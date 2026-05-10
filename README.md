@@ -91,12 +91,23 @@ ollama serve
 
 Ollama listens on `http://localhost:11434` by default.
 
-### 4. Start the HiDream Flask API
+### 4. Patch HiDream-O1-Image and start the Flask API
 
-Clone and set up [HiDream-O1-Image](https://github.com/HiDream-ai/HiDream-O1-Image), then:
+Clone and set up [HiDream-O1-Image](https://github.com/HiDream-ai/HiDream-O1-Image), then **replace `app.py`** with the patched version from this repo:
 
 ```bash
 cd HiDream-O1-Image
+# Back up original
+mv app.py app.py.original
+# Copy patched version from this repo
+cp ../OminiUi/app.py ./app.py
+```
+
+The patched `app.py` adds model reload support — OminiUI needs this to reload the model after auto-unload. Without it, model reload returns a 400 error.
+
+Then start the Flask API:
+
+```bash
 venv\Scripts\activate
 python app.py --model_path /path/to/model-HiDream-O1-Image-Dev --model_type dev --host 127.0.0.1 --port 7860
 ```
@@ -209,6 +220,7 @@ You can adjust the timeout with `MODEL_IDLE_TIMEOUT_MS` in `.env`.
 ```
 OminiUi/
 ├── .env.example                # Environment configuration template
+├── app.py                      # Patched HiDream Flask API (replace in HiDream-O1-Image/)
 ├── index.html                  # Vite entry HTML
 ├── package.json                # Dependencies and scripts
 ├── tsconfig.json               # TypeScript config (frontend)
