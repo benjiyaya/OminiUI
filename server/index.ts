@@ -105,7 +105,7 @@ app.delete('/api/sessions/:id/messages', (req, res) => {
 })
 
 // ── Start ────────────────────────────────────────────────────────────
-startIdleCheck()
+startIdleCheck().catch(console.error)
 
 app.listen(PORT, () => {
   console.log(`[OminiUI server] listening on http://localhost:${PORT}`)

@@ -41,8 +41,8 @@ function saveImageToResults(base64Png: string): string {
 }
 
 async function callHiDream(params: GenerateParams): Promise<{ image: string; imagePath: string }> {
-  // Mark model activity
-  touchActivity()
+  // Mark model activity (awaits reload if model was unloaded)
+  await touchActivity()
 
   const refsCount = (params.refs_b64 || []).length
   console.log(`[generate] Starting: mode=${params.mode} refs=${refsCount} prompt="${params.prompt.slice(0, 60)}..."`)

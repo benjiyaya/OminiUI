@@ -5,10 +5,10 @@ let lastActivity = 0
 let modelLoaded = true
 let idleTimer: ReturnType<typeof setInterval> | null = null
 
-export function touchActivity() {
+export async function touchActivity() {
   lastActivity = Date.now()
   if (!modelLoaded) {
-    reloadModel()
+    await reloadModel()
   }
 }
 
@@ -46,14 +46,34 @@ async function reloadModel() {
       modelLoaded = true
       console.log('[model-tracker] Model reloaded successfully')
     } else {
-      console.error('[model-tracker] Reload failed:', resp.status)
+      const text = await resp.text()
+      console.error('[model-tracker] Reload failed:', resp.status, text)
+      throw new Error(`Model reload failed: ${resp.status}`)
     }
   } catch (err) {
     console.error('[model-tracker] Reload request failed:', err)
+    throw err
   }
 }
 
-export function startIdleCheck() {
+async function syncModelStatus() {
+  try {
+    const resp = await fetch(`${HIDREAM_URL}/api/model/status`)
+    if (resp.ok) {
+      const data = await resp.json() as { loaded: boolean }
+      modelLoaded = data.loaded
+      console.log(`[model-tracker] Synced with Flask — model loaded: ${modelLoaded}`)
+    }
+  } catch {
+    console.log('[model-tracker] Could not reach Flask, assuming model not loaded')
+    modelLoaded = false
+  }
+}
+
+export async function startIdleCheck() {
+  // Sync actual model state from Flask before starting
+  await syncModelStatus()
+
   // Check every 60 seconds
   idleTimer = setInterval(() => {
     const idleMs = Date.now() - lastActivity
