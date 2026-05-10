@@ -15,6 +15,17 @@ A conversational AI interface for image generation and editing, powered by **HiD
 
 Describe what you want in natural language. The LLM reasons through your request, then calls the appropriate image tool automatically.
 
+<img width="1852" height="1046" alt="Screenshot 2026-05-11 045526" src="https://github.com/user-attachments/assets/92c4a84f-7bb7-4ffc-a3e4-3cf361fe7323" />
+
+<img width="1863" height="1048" alt="Screenshot 2026-05-11 045635" src="https://github.com/user-attachments/assets/36c964bb-6d39-4411-b534-823d3018828b" />
+
+<img width="1861" height="1050" alt="Screenshot 2026-05-11 045609" src="https://github.com/user-attachments/assets/bca70941-d655-48df-9432-dec776afec96" />
+
+<img width="1871" height="1046" alt="Screenshot 2026-05-11 045426" src="https://github.com/user-attachments/assets/27e20e57-5ea3-4af7-80e1-519c3785b04f" />
+
+<img width="1871" height="1055" alt="Screenshot 2026-05-11 045502" src="https://github.com/user-attachments/assets/fa22c97a-03d1-4230-8781-e915ba57f178" />
+
+
 ## Features
 
 - **Text-to-Image** — Generate images from detailed text prompts
