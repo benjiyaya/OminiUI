@@ -1,6 +1,6 @@
-# HiDream-O1-Image-OminiUI
+# OminiUI
 
-A conversational AI interface for image generation and editing, powered by **MCP (Model Context Protocol)** servers and any **OpenAI-compatible LLM**.
+A conversational AI interface for image and video generation, powered by **MCP (Model Context Protocol)** servers and any **OpenAI-compatible LLM**.
 
 Describe what you want in natural language. The LLM reasons through your request, then calls the appropriate image/video tool automatically via MCP servers.
 
