@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react'
 import Sidebar from './components/Sidebar'
 import Chat from './components/Chat'
+import McpSettings from './components/McpSettings'
 
 export interface ChatSession {
   id: string
@@ -19,6 +20,7 @@ export default function App() {
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [activeId, setActiveId] = useState<string>('')
   const [modelName, setModelName] = useState('')
+  const [view, setView] = useState<'chat' | 'mcp-settings'>('chat')
 
   // Load sessions from DB on mount
   useEffect(() => {
@@ -154,8 +156,11 @@ export default function App() {
         onNew={newChat}
         onDelete={deleteChat}
         modelName={modelName}
+        onOpenSettings={() => setView('mcp-settings')}
       />
-      {active && (
+      {view === 'mcp-settings' ? (
+        <McpSettings onBack={() => setView('chat')} />
+      ) : active && (
         <Chat
           key={activeId}
           sessionId={activeId}

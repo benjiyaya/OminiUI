@@ -3,153 +3,252 @@ import { v4 as uuid } from 'uuid'
 import { EventEmitter } from 'events'
 import fs from 'fs'
 import path from 'path'
-import { touchActivity } from './model-tracker.js'
+import { mcpClient } from './mcp-client.js'
 
-const HIDREAM_URL = process.env.HIDREAM_API_URL || 'http://localhost:7860'
-const RESULTS_DIR = path.resolve(process.env.HIDREAM_RESULTS_DIR || path.join('..', 'HiDream-O1-Image', 'results'))
-
-// Ensure results directory exists
+const RESULTS_DIR = path.resolve(process.env.RESULTS_DIR || path.join('results'))
 fs.mkdirSync(RESULTS_DIR, { recursive: true })
 
 // In-memory job store for SSE streaming
 const jobs = new Map<string, EventEmitter>()
 
-interface GenerateParams {
-  mode: 't2i' | 'edit' | 'subject'
-  prompt: string
-  refs_b64?: string[]
-  width?: number
-  height?: number
-  seed?: number
-  keep_original_aspect?: boolean
-}
-
-function timestampFilename(): string {
+function timestampFilename(ext = 'png'): string {
   const now = new Date()
   const pad = (n: number, w = 2) => String(n).padStart(w, '0')
   const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
   const rand = Math.random().toString(36).slice(2, 8)
-  return `img_${ts}_${rand}.png`
+  return `img_${ts}_${rand}.${ext}`
 }
 
-function saveImageToResults(base64Png: string): string {
-  const filename = timestampFilename()
+function saveImageToResults(base64Data: string, mimeType = 'image/png'): string {
+  const ext = mimeType.includes('jpeg') || mimeType.includes('jpg') ? 'jpg' : 'png'
+  const filename = timestampFilename(ext)
   const filepath = path.join(RESULTS_DIR, filename)
-  fs.writeFileSync(filepath, Buffer.from(base64Png, 'base64'))
+  fs.writeFileSync(filepath, Buffer.from(base64Data, 'base64'))
   console.log(`[generate] Saved -> ${filepath}`)
   return filepath
 }
 
-async function callHiDream(params: GenerateParams): Promise<{ image: string; imagePath: string }> {
-  // Mark model activity (awaits reload if model was unloaded)
-  await touchActivity()
+/**
+ * Copy a local file into the results directory and return the path.
+ * Handles ComfyUI-style outputs that write to a local output folder.
+ */
+function copyFileToResults(sourcePath: string): string | null {
+  try {
+    if (!fs.existsSync(sourcePath)) {
+      console.warn(`[generate] Source file not found: ${sourcePath}`)
+      return null
+    }
 
-  const refsCount = (params.refs_b64 || []).length
-  console.log(`[generate] Starting: mode=${params.mode} refs=${refsCount} prompt="${params.prompt.slice(0, 60)}..."`)
+    const ext = path.extname(sourcePath).replace('.', '') || 'png'
+    const filename = timestampFilename(ext)
+    const destPath = path.join(RESULTS_DIR, filename)
+    fs.copyFileSync(sourcePath, destPath)
+    console.log(`[generate] Copied -> ${destPath}`)
+    return destPath
+  } catch (err: any) {
+    console.warn(`[generate] Failed to copy file: ${err.message}`)
+    return null
+  }
+}
 
-  // Step 1: start the job
-  const body = JSON.stringify({
-    mode: params.mode,
-    prompt: params.prompt,
-    refs_b64: params.refs_b64 || [],
-    width: params.width || 2048,
-    height: params.height || 2048,
-    seed: params.seed || 32,
-    keep_original_aspect: params.keep_original_aspect || false,
-  })
+/**
+ * Fetch an image from a URL (asset_url from ComfyUI MCP etc.)
+ * and save it to the results directory. Returns the local path.
+ */
+async function downloadUrlToResults(url: string): Promise<string | null> {
+  try {
+    const resp = await fetch(url)
+    if (!resp.ok) {
+      console.warn(`[generate] Failed to fetch ${url}: HTTP ${resp.status}`)
+      return null
+    }
 
-  console.log(`[generate] Payload size: ${(body.length / 1024 / 1024).toFixed(1)}MB`)
+    const contentType = resp.headers.get('content-type') || 'image/png'
+    const ext = contentType.includes('jpeg') || contentType.includes('jpg') ? 'jpg'
+      : contentType.includes('webp') ? 'webp'
+      : contentType.includes('gif') ? 'gif'
+      : 'png'
+    const filename = timestampFilename(ext)
+    const filepath = path.join(RESULTS_DIR, filename)
 
-  const startResp = await fetch(`${HIDREAM_URL}/api/generate/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body,
-  })
+    const buffer = Buffer.from(await resp.arrayBuffer())
+    fs.writeFileSync(filepath, buffer)
+    console.log(`[generate] Downloaded -> ${filepath} (${(buffer.length / 1024).toFixed(1)}KB)`)
+    return filepath
+  } catch (err: any) {
+    console.warn(`[generate] Failed to download ${url}: ${err.message}`)
+    return null
+  }
+}
 
-  if (!startResp.ok) {
-    const errText = await startResp.text()
-    console.error(`[generate] HiDream returned ${startResp.status}: ${errText.slice(0, 500)}`)
-    throw new Error(`HiDream ${startResp.status}: ${errText.slice(0, 200)}`)
+interface ToolExecuteParams {
+  toolName: string
+  args: Record<string, unknown>
+  attachedImages?: string[]
+}
+
+/**
+ * Generic tool execution through MCP client.
+ * Handles multiple MCP server return formats:
+ *
+ * 1. MCP standard: content block with type="image" + base64 data
+ * 2. Custom base64: text block with JSON { image: "base64..." }
+ * 3. ComfyUI-style: text block with JSON { asset_url: "http://..." } or { asset_url: "/path/to/file.png" }
+ * 4. ComfyUI inline preview: text block with JSON { inline_preview_base64: "base64..." }
+ * 5. Local file path: text block with a file path ending in image extension
+ */
+export async function executeToolCall(
+  params: ToolExecuteParams
+): Promise<{ image?: string; imagePath?: string; result: any }> {
+  const { toolName, args, attachedImages } = params
+  const mapping = mcpClient.getToolMapping(toolName)
+  if (!mapping) {
+    throw new Error(`Unknown tool: ${toolName}`)
   }
 
-  const { job_id } = (await startResp.json()) as { job_id: string }
+  // Inject attached images into args if the tool expects them
+  const finalArgs = { ...args }
+  if (attachedImages && attachedImages.length > 0) {
+    const schema = mapping.inputSchema as any
+    const props = schema?.properties || {}
+    if (props.image && attachedImages.length >= 1) {
+      finalArgs.image = attachedImages[0]
+    }
+    if (props.images && attachedImages.length >= 1) {
+      finalArgs.images = attachedImages
+    }
+    if (props.refs_b64 && attachedImages.length >= 1) {
+      finalArgs.refs_b64 = attachedImages
+    }
+    if (props.ref_images && attachedImages.length >= 1) {
+      finalArgs.ref_images = attachedImages
+    }
+  }
 
-  // Step 2: stream SSE from HiDream and forward progress
-  return new Promise<{ image: string; imagePath: string }>((resolve, reject) => {
-    const emitter = new EventEmitter()
-    jobs.set(job_id, emitter)
+  console.log(`[generate] Executing ${toolName} on ${mapping.displayName}`)
 
-    const streamUrl = `${HIDREAM_URL}/api/generate/stream/${job_id}`
+  const mcpResult = await mcpClient.callTool(toolName, finalArgs)
 
-    fetch(streamUrl).then(async (streamResp) => {
-      if (!streamResp.ok) {
-        reject(new Error(`HiDream stream failed: ${streamResp.status}`))
-        return
+  let image: string | undefined
+  let imagePath: string | undefined
+
+  if (mcpResult?.content && Array.isArray(mcpResult.content)) {
+    for (const block of mcpResult.content) {
+      // ── Format 1: MCP standard image block (type="image", base64 data) ──
+      if (block.type === 'image' && block.data) {
+        image = block.data
+        imagePath = saveImageToResults(block.data, block.mimeType || 'image/png')
+        break
       }
 
-      const reader = streamResp.body?.getReader()
-      if (!reader) {
-        reject(new Error('No stream body'))
-        return
-      }
+      if (block.type === 'text' && block.text) {
+        // Try parsing as JSON for formats 2-4
+        try {
+          const parsed = JSON.parse(block.text)
 
-      const decoder = new TextDecoder()
-      let buffer = ''
+          // ── Format 2: Custom base64 in JSON ──
+          if (parsed.image) {
+            image = parsed.image
+            imagePath = saveImageToResults(parsed.image)
+            break
+          }
 
-      try {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
+          // ── Format 3: ComfyUI asset_url ──
+          if (parsed.asset_url) {
+            const assetUrl: string = parsed.asset_url
 
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || ''
+            // Check if it's a local file path (not a URL)
+            if (assetUrl.startsWith('/') || assetUrl.match(/^[A-Za-z]:\\/)) {
+              const localPath = copyFileToResults(assetUrl)
+              if (localPath) {
+                imagePath = localPath
+                // Read the copied file back as base64 for the frontend
+                image = fs.readFileSync(localPath).toString('base64')
+                break
+              }
+            }
 
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue
-            const data = JSON.parse(line.slice(6))
+            // It's an HTTP URL — download it
+            const localPath = await downloadUrlToResults(assetUrl)
+            if (localPath) {
+              imagePath = localPath
+              image = fs.readFileSync(localPath).toString('base64')
+              break
+            }
+          }
 
-            if (data.type === 'progress') {
-              emitter.emit('progress', {
-                step: data.step,
-                total: data.total,
-                preview: data.preview || null,
-              })
-            } else if (data.type === 'done') {
-              // Auto-save to results folder
-              const imagePath = saveImageToResults(data.image)
-              emitter.emit('done', { image: data.image, imagePath })
-              jobs.delete(job_id)
-              resolve({ image: data.image, imagePath })
-            } else if (data.type === 'error') {
-              emitter.emit('error', data.message)
-              jobs.delete(job_id)
-              reject(new Error(data.message))
+          // ── Format 4: ComfyUI inline preview ──
+          if (parsed.inline_preview_base64) {
+            image = parsed.inline_preview_base64
+            imagePath = saveImageToResults(parsed.inline_preview_base64)
+            break
+          }
+
+          // ── Format: Multiple assets array ──
+          if (Array.isArray(parsed.assets) && parsed.assets.length > 0) {
+            const firstAsset = parsed.assets[0]
+            if (firstAsset.asset_url) {
+              const assetUrl: string = firstAsset.asset_url
+              if (assetUrl.startsWith('/') || assetUrl.match(/^[A-Za-z]:\\/)) {
+                const localPath = copyFileToResults(assetUrl)
+                if (localPath) {
+                  imagePath = localPath
+                  image = fs.readFileSync(localPath).toString('base64')
+                  break
+                }
+              } else {
+                const localPath = await downloadUrlToResults(assetUrl)
+                if (localPath) {
+                  imagePath = localPath
+                  image = fs.readFileSync(localPath).toString('base64')
+                  break
+                }
+              }
+            }
+            if (firstAsset.image || firstAsset.base64) {
+              image = firstAsset.image || firstAsset.base64
+              imagePath = saveImageToResults(image)
+              break
+            }
+          }
+        } catch {
+          // Not JSON — check for bare file path (format 5)
+          const text = block.text.trim()
+          if (isImageFilePath(text)) {
+            const localPath = copyFileToResults(text)
+            if (localPath) {
+              imagePath = localPath
+              image = fs.readFileSync(localPath).toString('base64')
+              break
             }
           }
         }
-      } catch (e: any) {
-        jobs.delete(job_id)
-        reject(e)
+
+        // ── Format 5: Bare file path in text block ──
+        const text = block.text.trim()
+        if (!image && isImageFilePath(text)) {
+          const localPath = copyFileToResults(text)
+          if (localPath) {
+            imagePath = localPath
+            image = fs.readFileSync(localPath).toString('base64')
+            break
+          }
+        }
       }
-    }).catch((e) => {
-      jobs.delete(job_id)
-      reject(e)
-    })
-  })
+    }
+  }
+
+  return { image, imagePath, result: mcpResult }
 }
 
-// Direct generation endpoint (returns final result)
-export async function generateHandler(req: Request, res: Response) {
-  try {
-    const params = req.body as GenerateParams
-    console.log(`[generate] Request: mode=${params.mode} refs=${(params.refs_b64 || []).length} prompt="${(params.prompt || '').slice(0, 80)}"`)
-    const { image, imagePath } = await callHiDream(params)
-    res.json({ image, imagePath })
-  } catch (err: any) {
-    console.error('[generate] Error:', err.message)
-    res.status(500).json({ error: err.message || 'Generation failed' })
-  }
+/**
+ * Check if a string looks like a path to an image file.
+ */
+function isImageFilePath(text: string): boolean {
+  const imageExts = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp']
+  const lower = text.toLowerCase()
+  return imageExts.some((ext) => lower.endsWith(ext)) &&
+    (text.startsWith('/') || text.match(/^[A-Za-z]:\\/) || text.startsWith('.\\') || text.startsWith('./'))
 }
 
 // SSE streaming endpoint for progress
@@ -171,7 +270,7 @@ export async function streamHandler(req: Request, res: Response) {
     res.write(`data: ${JSON.stringify({ type: 'progress', ...data })}\n\n`)
   }
   const onDone = (result: any) => {
-    res.write(`data: ${JSON.stringify({ type: 'done', image: result.image, imagePath: result.imagePath })}\n\n`)
+    res.write(`data: ${JSON.stringify({ type: 'done', ...result })}\n\n`)
     res.end()
   }
   const onError = (msg: string) => {
@@ -190,5 +289,45 @@ export async function streamHandler(req: Request, res: Response) {
   })
 }
 
-// Export for use by chat handler
-export { callHiDream, jobs }
+// Direct execution endpoint (returns final result)
+export async function executeHandler(req: Request, res: Response) {
+  const params = req.body as ToolExecuteParams
+  const jobId = uuid()
+  const emitter = new EventEmitter()
+  jobs.set(jobId, emitter)
+
+  try {
+    const result = await executeToolCall(params)
+    emitter.emit('done', result)
+    jobs.delete(jobId)
+    res.json({ jobId, ...result })
+  } catch (err: any) {
+    console.error('[generate] Error:', err.message)
+    jobs.delete(jobId)
+    res.status(500).json({ error: err.message || 'Generation failed' })
+  }
+}
+
+// Backward-compatible /api/generate endpoint
+export async function generateHandler(req: Request, res: Response) {
+  const params = req.body as any
+  const { mode, prompt, refs_b64, width, height, seed, keep_original_aspect } = params
+
+  // Map old format to new tool call
+  let toolName = 'hidream_create_image'
+  if (mode === 'edit') toolName = 'hidream_edit_image'
+  if (mode === 'subject') toolName = 'hidream_subject_driven_image'
+
+  const args: Record<string, unknown> = { prompt, width, height, seed }
+  if (keep_original_aspect !== undefined) args.keep_original_aspect = keep_original_aspect
+
+  try {
+    const result = await executeToolCall({ toolName, args, attachedImages: refs_b64 })
+    res.json({ image: result.image, imagePath: result.imagePath })
+  } catch (err: any) {
+    console.error('[generate] Error:', err.message)
+    res.status(500).json({ error: err.message || 'Generation failed' })
+  }
+}
+
+export { jobs }

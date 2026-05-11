@@ -1,6 +1,31 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import MessageBubble from './MessageBubble'
 
+interface StoryScene {
+  sceneNumber: number
+  title: string
+  description: string
+  characters: string[]
+  setting: string
+  mood: string
+  cameraAngle: string
+  imagePrompt: string
+}
+
+interface StoryCharacter {
+  name: string
+  description: string
+  visualNotes: string
+}
+
+interface StoryPlan {
+  title: string
+  synopsis: string
+  style: string
+  characters: StoryCharacter[]
+  scenes: StoryScene[]
+}
+
 interface Props {
   sessionId: string
   messages: any[]
@@ -11,8 +36,8 @@ interface Props {
 
 const WELCOME_CHIPS = [
   'A cat astronaut floating in space',
-  'Edit my photo to look like a painting',
   'A cyberpunk city at sunset, neon lights',
+  'A fantasy landscape with dragons',
   'Turn this sketch into a realistic photo',
 ]
 
@@ -24,13 +49,15 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
   const [refineEnabled, setRefineEnabled] = useState(false)
   const [refining, setRefining] = useState(false)
+  const [storyAgentMode, setStoryAgentMode] = useState(false)
+  const [pendingPlan, setPendingPlan] = useState<StoryPlan | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, loading])
+  }, [messages, loading, pendingPlan])
 
   const autoResize = useCallback(() => {
     const el = textareaRef.current
@@ -45,7 +72,7 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
     const files = Array.from(e.target.files || [])
     const remaining = 6 - uploadedImages.length
     if (remaining <= 0) {
-      setError('Maximum 6 images allowed')
+      setError('Maximum 6 files allowed')
       e.target.value = ''
       return
     }
@@ -53,10 +80,9 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
     toAdd.forEach((file) => {
       const reader = new FileReader()
       reader.onload = () => {
-        const b64 = (reader.result as string).split(',')[1]
         setUploadedImages((prev) => {
           if (prev.length >= 6) return prev
-          return [...prev, b64]
+          return [...prev, reader.result as string]
         })
       }
       reader.readAsDataURL(file)
@@ -79,7 +105,7 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({ error: 'Refine failed' }))
         console.warn('[refine]', err.error)
-        return text // Fall back to original
+        return text
       }
       const data = await resp.json()
       return data.prompt || text
@@ -91,13 +117,98 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
     }
   }
 
+  const executeTool = async (
+    tc: any,
+    attachedImages: string[],
+    currentMsgs: any[]
+  ): Promise<any> => {
+    const toolName = tc.function.name
+    const args = JSON.parse(tc.function.arguments || '{}')
+
+    const progressMsg = {
+      role: 'assistant' as const,
+      content: '',
+      tool_call_id: toolName,
+      toolName,
+      generating: true,
+      progress: { step: 0, total: 100, preview: null },
+    }
+    onUpdateMessages([...currentMsgs, progressMsg])
+
+    try {
+      const resp = await fetch('/api/tools/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolName, args, attachedImages }),
+      })
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: 'Generation failed' }))
+        throw new Error(err.error || `HTTP ${resp.status}`)
+      }
+
+      const data = await resp.json()
+
+      return {
+        role: 'tool' as const,
+        content: data.image
+          ? `Image generated successfully.`
+          : `Tool ${toolName} executed successfully.`,
+        tool_call_id: toolName,
+        toolName,
+        image: data.image,
+        imagePath: data.imagePath,
+        prompt: args.prompt,
+      }
+    } catch (err: any) {
+      return {
+        role: 'tool' as const,
+        content: `Error: ${err.message}`,
+        tool_call_id: toolName,
+        toolName,
+        error: true,
+      }
+    }
+  }
+
+  /**
+   * Approve the plan -- short confirmation only.
+   * The story plan is already visible in chat. No need to repeat it.
+   */
+  const approvePlan = async () => {
+    if (!pendingPlan) return
+    const plan = pendingPlan
+    setPendingPlan(null)
+    setStoryAgentMode(false)
+
+    const planMsg: any = {
+      role: 'assistant',
+      content: `Plan approved for "${plan.title}". Switch off Story Agent and use any scene prompt to generate images.`,
+      messageType: 'story-plan-status',
+      plan,
+    }
+    const accumulated = [...messages, planMsg]
+    onUpdateMessages(accumulated)
+    onPersistMessage(planMsg)
+  }
+
+  const rejectPlan = () => {
+    setPendingPlan(null)
+    const feedbackMsg: any = {
+      role: 'assistant',
+      content: 'Plan rejected. Please tell me what you want to change -- characters, scenes, style, mood, or anything else -- and I will revise the plan.',
+    }
+    const accumulated = [...messages, feedbackMsg]
+    onUpdateMessages(accumulated)
+    onPersistMessage(feedbackMsg)
+  }
+
   const sendMessage = async () => {
     const text = input.trim()
     if (!text || loading) return
 
     setError('')
 
-    // Optionally refine the prompt
     let finalText = text
     if (refineEnabled) {
       finalText = await refinePromptText(text)
@@ -105,8 +216,8 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
 
     const userMsg: any = { role: 'user', content: finalText }
     if (uploadedImages.length > 0) {
-      userMsg.images = uploadedImages
-      console.log(`[chat] Sending ${uploadedImages.length} attached images`)
+      userMsg.images = uploadedImages.map((dataUrl) => dataUrl.split(',')[1] || dataUrl)
+      console.log(`[chat] Sending ${uploadedImages.length} attached files`)
     }
 
     const newMessages = [...messages, userMsg]
@@ -117,261 +228,121 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
     setLoading(true)
 
     try {
-      // Build API messages (strip internal fields, ensure non-null content)
-      const apiMessages = newMessages.map((m) => ({
-        role: m.role,
-        content: m.content || '',
-      }))
+      if (storyAgentMode) {
+        // Story Agent mode: plan story, no image generation
+        const history = newMessages.map((m) => ({
+          role: m.role === 'user' ? 'human' : m.role === 'assistant' ? 'ai' : m.role,
+          content: m.content || '',
+        }))
 
-      const resp = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: apiMessages }),
-      })
-
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: 'Request failed' }))
-        throw new Error(err.error || `HTTP ${resp.status}`)
-      }
-
-      const data = await resp.json()
-
-      if (data.tool_calls && data.tool_calls.length > 0) {
-        // Assistant message with tool calls
-        const assistantMsg = {
-          role: 'assistant',
-          content: data.content || '',
-          tool_calls: data.tool_calls,
-        }
-        let accumulated = [...newMessages, assistantMsg]
-        onUpdateMessages(accumulated)
-        onPersistMessage(assistantMsg)
-
-        // Execute each tool call sequentially
-        // Images always come from the user's uploads — LLM can't provide base64
-        const lastUserMsg = [...newMessages].reverse().find((m) => m.role === 'user')
-        const attachedImages: string[] = lastUserMsg?.images || []
-
-        for (const tc of data.tool_calls) {
-          const toolName = tc.function.name
-          const args = JSON.parse(tc.function.arguments)
-
-          let toolResult: any
-          if (toolName === 'create_image') {
-            toolResult = await executeCreateImage(args, accumulated)
-          } else if (toolName === 'edit_image') {
-            // Edit: always use the first attached image
-            const editImage = attachedImages[0] || args.image
-            toolResult = await executeEditImage({ ...args, image: editImage }, accumulated)
-          } else if (toolName === 'subject_driven_image') {
-            // Subject-driven: always use attached images (2-6)
-            toolResult = await executeSubjectImage({ ...args, ref_images: attachedImages }, accumulated)
-          }
-
-          if (toolResult) {
-            accumulated = [...accumulated, toolResult]
-            onUpdateMessages(accumulated)
-            onPersistMessage(toolResult)
-          }
-        }
-
-        // Get follow-up from the model after tool results
-        // Filter out tool messages and ensure non-null content for Ollama
-        const followUpResp = await fetch('/api/chat', {
+        const resp = await fetch('/api/workflow', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messages: accumulated
-              .filter((m: any) => m.role !== 'tool')
-              .map((m: any) => ({
-                role: m.role,
-                content: m.content || '',
-              })),
-          }),
+          body: JSON.stringify({ message: finalText, history }),
         })
 
-        if (followUpResp.ok) {
-          const followUpData = await followUpResp.json()
-          if (followUpData.content) {
-            const followMsg = { role: 'assistant', content: followUpData.content }
-            onUpdateMessages([...accumulated, followMsg])
-            onPersistMessage(followMsg)
-          }
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({ error: 'Workflow failed' }))
+          throw new Error(err.error || `HTTP ${resp.status}`)
         }
-      } else {
-        // Plain text response
-        const assistantMsg = { role: 'assistant', content: data.content || '' }
+
+        const data = await resp.json()
+
+        // Build human-readable text from the agent response
+        // If a plan was parsed, strip the JSON code block and show a summary
+        let displayText = data.text || 'Story agent completed.'
+
+        if (data.plan) {
+          // Remove the ```json ... ``` block from the displayed text
+          displayText = displayText.replace(/```json[\s\S]*?```/g, '').trim()
+        }
+
+        const assistantMsg: any = {
+          role: 'assistant',
+          content: displayText || 'Story agent completed.',
+        }
+
+        if (data.plan) {
+          assistantMsg.messageType = 'story-plan'
+          assistantMsg.plan = data.plan
+          setPendingPlan(data.plan)
+        }
+
         onUpdateMessages([...newMessages, assistantMsg])
         onPersistMessage(assistantMsg)
+      } else {
+        // Normal mode: simple chat + tool calls
+        const apiMessages = newMessages.map((m) => ({
+          role: m.role,
+          content: m.content || '',
+        }))
+
+        const resp = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: apiMessages }),
+        })
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({ error: 'Request failed' }))
+          throw new Error(err.error || `HTTP ${resp.status}`)
+        }
+
+        const data = await resp.json()
+
+        if (data.tool_calls && data.tool_calls.length > 0) {
+          const assistantMsg = {
+            role: 'assistant',
+            content: data.content || '',
+            tool_calls: data.tool_calls,
+          }
+          let accumulated = [...newMessages, assistantMsg]
+          onUpdateMessages(accumulated)
+          onPersistMessage(assistantMsg)
+
+          const lastUserMsg = [...newMessages].reverse().find((m) => m.role === 'user')
+          const attachedImages: string[] = lastUserMsg?.images || []
+
+          for (const tc of data.tool_calls) {
+            const toolResult = await executeTool(tc, attachedImages, accumulated)
+            if (toolResult) {
+              accumulated = [...accumulated, toolResult]
+              onUpdateMessages(accumulated)
+              onPersistMessage(toolResult)
+            }
+          }
+
+          const followUpResp = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              messages: accumulated
+                .filter((m: any) => m.role !== 'tool')
+                .map((m: any) => ({
+                  role: m.role,
+                  content: m.content || '',
+                })),
+            }),
+          })
+
+          if (followUpResp.ok) {
+            const followUpData = await followUpResp.json()
+            if (followUpData.content) {
+              const followMsg = { role: 'assistant', content: followUpData.content }
+              onUpdateMessages([...accumulated, followMsg])
+              onPersistMessage(followMsg)
+            }
+          }
+        } else {
+          const assistantMsg = { role: 'assistant', content: data.content || '' }
+          onUpdateMessages([...newMessages, assistantMsg])
+          onPersistMessage(assistantMsg)
+        }
       }
     } catch (err: any) {
       setError(err.message)
     } finally {
       setLoading(false)
-    }
-  }
-
-  const executeCreateImage = async (args: any, currentMsgs: any[]) => {
-    // Add progress message
-    const progressMsg = {
-      role: 'assistant' as const,
-      content: '',
-      tool_call_id: 'create_image',
-      toolName: 'create_image',
-      generating: true,
-      progress: { step: 0, total: 28, preview: null },
-    }
-    onUpdateMessages([...currentMsgs, progressMsg])
-
-    try {
-      const resp = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode: 't2i',
-          prompt: args.prompt,
-          width: args.width || 2048,
-          height: args.height || 2048,
-          seed: args.seed || 32,
-        }),
-      })
-
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: 'Generation failed' }))
-        throw new Error(err.error)
-      }
-
-      const { image, imagePath } = await resp.json()
-      return {
-        role: 'tool' as const,
-        content: `Image generated successfully.`,
-        tool_call_id: 'create_image',
-        toolName: 'create_image',
-        image,
-        imagePath,
-        prompt: args.prompt,
-      }
-    } catch (err: any) {
-      return {
-        role: 'tool' as const,
-        content: `Error: ${err.message}`,
-        tool_call_id: 'create_image',
-        toolName: 'create_image',
-        error: true,
-      }
-    }
-  }
-
-  const executeEditImage = async (args: any, currentMsgs: any[]) => {
-    const progressMsg = {
-      role: 'assistant' as const,
-      content: '',
-      tool_call_id: 'edit_image',
-      toolName: 'edit_image',
-      generating: true,
-      progress: { step: 0, total: 28, preview: null },
-    }
-    onUpdateMessages([...currentMsgs, progressMsg])
-
-    try {
-      console.log(`[edit] image present: ${!!args.image}`)
-      const resp = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode: 'edit',
-          prompt: args.prompt,
-          refs_b64: [args.image],
-          width: args.width || 2048,
-          height: args.height || 2048,
-          seed: args.seed || 32,
-          keep_original_aspect: args.keep_original_aspect || false,
-        }),
-      })
-
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: 'Edit failed' }))
-        throw new Error(err.error)
-      }
-
-      const { image, imagePath } = await resp.json()
-      return {
-        role: 'tool' as const,
-        content: `Image edited successfully.`,
-        tool_call_id: 'edit_image',
-        toolName: 'edit_image',
-        image,
-        imagePath,
-        prompt: args.prompt,
-      }
-    } catch (err: any) {
-      return {
-        role: 'tool' as const,
-        content: `Error: ${err.message}`,
-        tool_call_id: 'edit_image',
-        toolName: 'edit_image',
-        error: true,
-      }
-    }
-  }
-
-  const executeSubjectImage = async (args: any, currentMsgs: any[]) => {
-    const progressMsg = {
-      role: 'assistant' as const,
-      content: '',
-      tool_call_id: 'subject_driven_image',
-      toolName: 'subject_driven_image',
-      generating: true,
-      progress: { step: 0, total: 28, preview: null },
-    }
-    onUpdateMessages([...currentMsgs, progressMsg])
-
-    try {
-      const refImages: string[] = args.ref_images || []
-      console.log(`[subject] ref_images count: ${refImages.length}`)
-      if (refImages.length < 2) {
-        throw new Error('Subject-driven generation requires at least 2 reference images')
-      }
-      if (refImages.length > 6) {
-        throw new Error('Subject-driven generation supports a maximum of 6 reference images')
-      }
-
-      const resp = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode: 'subject',
-          prompt: args.prompt,
-          refs_b64: refImages,
-          width: args.width || 2048,
-          height: args.height || 2048,
-          seed: args.seed || 32,
-        }),
-      })
-
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: 'Subject generation failed' }))
-        throw new Error(err.error)
-      }
-
-      const { image, imagePath } = await resp.json()
-      return {
-        role: 'tool' as const,
-        content: `Image generated successfully with ${refImages.length} reference images.`,
-        tool_call_id: 'subject_driven_image',
-        toolName: 'subject_driven_image',
-        image,
-        imagePath,
-        prompt: args.prompt,
-      }
-    } catch (err: any) {
-      return {
-        role: 'tool' as const,
-        content: `Error: ${err.message}`,
-        tool_call_id: 'subject_driven_image',
-        toolName: 'subject_driven_image',
-        error: true,
-      }
     }
   }
 
@@ -400,7 +371,7 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
         <div className="chat-header-title">OminiUI</div>
         <div className="chat-header-status">
           <span className="status-dot" />
-          HiDream-O1-Image ready
+          Ready
         </div>
       </div>
 
@@ -410,8 +381,8 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
             <div className="welcome-icon">🎨</div>
             <div className="welcome-title">What shall we create?</div>
             <div className="welcome-sub">
-              Describe an image to generate, or upload a photo to edit.
-              I use HiDream-O1-Image powered by local Ollama reasoning.
+              Describe an image or video to generate, or upload a photo to edit.
+              Add model servers in Settings to enable generation tools.
             </div>
             <div className="welcome-chips">
               {WELCOME_CHIPS.map((c) => (
@@ -430,6 +401,13 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
               msg={msg}
               onImageClick={setLightboxSrc}
               onDownload={downloadImage}
+              onAddToAttachment={(b64: string) => {
+                const dataUrl = `data:image/png;base64,${b64}`
+                setUploadedImages((prev) => {
+                  if (prev.length >= 6) return prev
+                  return [...prev, dataUrl]
+                })
+              }}
             />
           ))}
           {loading && (
@@ -448,18 +426,54 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
         </div>
       )}
 
+      {/* Story Plan Approve/Reject bar */}
+      {pendingPlan && (
+        <div className="plan-action-bar">
+          <span className="plan-action-label">Review the story plan above</span>
+          <button className="btn-approve" onClick={approvePlan}>
+            Approve
+          </button>
+          <button className="btn-reject" onClick={rejectPlan}>
+            Reject
+          </button>
+        </div>
+      )}
+
       <div className="input-area">
         <div className="input-wrapper">
           {uploadedImages.length > 0 && (
             <div className="upload-preview">
-              {uploadedImages.map((b64, i) => (
-                <div key={i} className="upload-thumb">
-                  <img src={`data:image/png;base64,${b64}`} alt="Upload" />
-                  <button className="upload-thumb-remove" onClick={() => removeUpload(i)}>
-                    ✕
-                  </button>
-                </div>
-              ))}
+              {uploadedImages.map((dataUrl, i) => {
+                const mime = dataUrl.split(';')[0].split(':')[1] || 'image/png'
+                if (mime.startsWith('video/')) {
+                  return (
+                    <div key={i} className="upload-thumb">
+                      <video src={dataUrl} muted />
+                      <button className="upload-thumb-remove" onClick={() => removeUpload(i)}>
+                        x
+                      </button>
+                    </div>
+                  )
+                }
+                if (mime.startsWith('audio/')) {
+                  return (
+                    <div key={i} className="upload-thumb upload-thumb-audio">
+                      <span className="upload-thumb-audio-icon">~</span>
+                      <button className="upload-thumb-remove" onClick={() => removeUpload(i)}>
+                        x
+                      </button>
+                    </div>
+                  )
+                }
+                return (
+                  <div key={i} className="upload-thumb">
+                    <img src={dataUrl} alt="Upload" />
+                    <button className="upload-thumb-remove" onClick={() => removeUpload(i)}>
+                      x
+                    </button>
+                  </div>
+                )
+              })}
             </div>
           )}
           <div className="input-tools">
@@ -467,14 +481,14 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
               className="btn-tool"
               onClick={() => fileRef.current?.click()}
               disabled={uploadedImages.length >= 6}
-              title={uploadedImages.length >= 6 ? 'Maximum 6 images' : 'Attach up to 6 images (edit: 1, subject: 2-6)'}
+              title={uploadedImages.length >= 6 ? 'Maximum 6 files' : 'Attach up to 6 files (images, audio, video)'}
             >
-              📎 {uploadedImages.length > 0 ? `${uploadedImages.length}/6 images` : 'Attach images'}
+              + {uploadedImages.length > 0 ? `${uploadedImages.length}/6 files` : 'Attach files'}
             </button>
             <input
               ref={fileRef}
               type="file"
-              accept="image/*"
+              accept="image/*,audio/*,video/*"
               multiple
               style={{ display: 'none' }}
               onChange={handleFileUpload}
@@ -484,7 +498,14 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
               onClick={() => setRefineEnabled(!refineEnabled)}
               title="Enhance prompt with AI before sending"
             >
-              ✨ {refining ? 'Refining...' : 'Enhance Prompt'}
+              * {refining ? 'Refining...' : 'Enhance Prompt'}
+            </button>
+            <button
+              className={`btn-tool ${storyAgentMode ? 'active' : ''}`}
+              onClick={() => setStoryAgentMode(!storyAgentMode)}
+              title="Story Agent mode: plan a visual story with scenes, then review and approve before generating"
+            >
+              @ {storyAgentMode ? 'Story Agent ON' : 'Story Agent'}
             </button>
           </div>
           <div className="input-box">
@@ -493,7 +514,11 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Describe an image to create, or upload a photo and describe edits..."
+              placeholder={
+                storyAgentMode
+                  ? 'Describe a story you want to create (characters, scenes, style)...'
+                  : 'Describe an image to create, or upload a photo and describe edits...'
+              }
               rows={1}
             />
             <button
@@ -502,12 +527,13 @@ export default function Chat({ sessionId, messages, onUpdateMessages, onPersistM
               disabled={!input.trim() || loading || refining}
               title="Send"
             >
-              →
+              {'->'}
             </button>
           </div>
           <div className="input-hint">
-            Press Enter to send · Shift+Enter for new line
-            {refineEnabled && ' · ✨ Prompt enhancement ON'}
+            Press Enter to send | Shift+Enter for new line
+            {refineEnabled && ' | * Prompt enhancement ON'}
+            {storyAgentMode && ' | @ Story Agent ON'}
           </div>
         </div>
       </div>

@@ -1,0 +1,18 @@
+{
+  "servers": [
+    {
+      "name": "HiDream-O1-Image",
+      "displayName": "MCP for HiDream-O1-Image",
+      "url": "http://127.0.0.1:8085/mcp",
+      "enabled": false,
+      "idleTimeoutMs": 600000
+    },
+    {
+      "name": "ComfyUI",
+      "displayName": "ComfyUI MCP",
+      "url": "http://127.0.0.1:9000/mcp",
+      "enabled": true,
+      "idleTimeoutMs": 6000000000
+    }
+  ]
+}

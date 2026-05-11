@@ -1,93 +1,115 @@
-const HIDREAM_URL = process.env.HIDREAM_API_URL || 'http://localhost:7860'
-const IDLE_TIMEOUT_MS = parseInt(process.env.MODEL_IDLE_TIMEOUT_MS || '600000', 10)
+import { mcpClient } from './mcp-client.js'
+import type { ServerConfig } from './mcp-config.js'
 
-let lastActivity = 0
-let modelLoaded = true
+interface TrackerState {
+  serverName: string
+  lastActivity: number
+  loaded: boolean
+  idleTimeoutMs: number
+}
+
+const trackers = new Map<string, TrackerState>()
 let idleTimer: ReturnType<typeof setInterval> | null = null
 
-export async function touchActivity() {
-  lastActivity = Date.now()
-  if (!modelLoaded) {
-    await reloadModel()
-  }
-}
-
-export function getModelStatus() {
-  return {
-    loaded: modelLoaded,
-    lastActivity,
-    idleMs: Date.now() - lastActivity,
-    idleTimeoutMs: IDLE_TIMEOUT_MS,
-  }
-}
-
-async function unloadModel() {
-  if (!modelLoaded) return
-  console.log('[model-tracker] Unloading HiDream model after 10 min idle...')
-  try {
-    const resp = await fetch(`${HIDREAM_URL}/api/model/unload`, { method: 'POST' })
-    if (resp.ok) {
-      modelLoaded = false
-      console.log('[model-tracker] Model unloaded successfully')
-    } else {
-      console.error('[model-tracker] Unload failed:', resp.status)
+export function initTrackers(configs: ServerConfig[]): void {
+  trackers.clear()
+  for (const config of configs) {
+    if (config.idleTimeoutMs && config.idleTimeoutMs > 0) {
+      trackers.set(config.name, {
+        serverName: config.name,
+        lastActivity: Date.now(),
+        loaded: true,
+        idleTimeoutMs: config.idleTimeoutMs,
+      })
     }
-  } catch (err) {
-    console.error('[model-tracker] Unload request failed:', err)
   }
 }
 
-async function reloadModel() {
-  if (modelLoaded) return
-  console.log('[model-tracker] Reloading HiDream model...')
-  try {
-    const resp = await fetch(`${HIDREAM_URL}/api/model/reload`, { method: 'POST' })
-    if (resp.ok) {
-      modelLoaded = true
-      console.log('[model-tracker] Model reloaded successfully')
-    } else {
-      const text = await resp.text()
-      console.error('[model-tracker] Reload failed:', resp.status, text)
-      throw new Error(`Model reload failed: ${resp.status}`)
+export async function touchActivity(serverName: string): Promise<void> {
+  const tracker = trackers.get(serverName)
+  if (!tracker) return
+
+  tracker.lastActivity = Date.now()
+
+  if (!tracker.loaded) {
+    await reloadServer(serverName)
+  }
+}
+
+export function getTrackerStatuses(): Record<string, any> {
+  const statuses: Record<string, any> = {}
+  for (const [name, tracker] of trackers) {
+    statuses[name] = {
+      loaded: tracker.loaded,
+      lastActivity: tracker.lastActivity,
+      idleMs: Date.now() - tracker.lastActivity,
+      idleTimeoutMs: tracker.idleTimeoutMs,
     }
-  } catch (err) {
-    console.error('[model-tracker] Reload request failed:', err)
+  }
+  return statuses
+}
+
+async function unloadServer(serverName: string): Promise<void> {
+  const tracker = trackers.get(serverName)
+  if (!tracker || !tracker.loaded) return
+
+  const conn = mcpClient.getServerConnection(serverName)
+  if (!conn) return
+
+  console.log(`[model-tracker] Unloading ${serverName} after idle timeout...`)
+  try {
+    // Try calling a standard unload tool if the server exposes one
+    const hasUnloadTool = conn.tools.some(
+      (t: any) => t.name === 'unload' || t.name === 'model_unload'
+    )
+    if (hasUnloadTool) {
+      const toolName = conn.tools.find((t: any) => t.name === 'unload' || t.name === 'model_unload')?.name
+      await mcpClient.callTool(`${serverName}_${toolName}`, {})
+    }
+    tracker.loaded = false
+    console.log(`[model-tracker] ${serverName} unloaded`)
+  } catch (err: any) {
+    console.error(`[model-tracker] Failed to unload ${serverName}: ${err.message}`)
+  }
+}
+
+async function reloadServer(serverName: string): Promise<void> {
+  const tracker = trackers.get(serverName)
+  if (!tracker || tracker.loaded) return
+
+  const conn = mcpClient.getServerConnection(serverName)
+  if (!conn) return
+
+  console.log(`[model-tracker] Reloading ${serverName}...`)
+  try {
+    const hasReloadTool = conn.tools.some(
+      (t: any) => t.name === 'reload' || t.name === 'model_reload'
+    )
+    if (hasReloadTool) {
+      const toolName = conn.tools.find((t: any) => t.name === 'reload' || t.name === 'model_reload')?.name
+      await mcpClient.callTool(`${serverName}_${toolName}`, {})
+    }
+    tracker.loaded = true
+    console.log(`[model-tracker] ${serverName} reloaded`)
+  } catch (err: any) {
+    console.error(`[model-tracker] Failed to reload ${serverName}: ${err.message}`)
     throw err
   }
 }
 
-async function syncModelStatus() {
-  try {
-    const resp = await fetch(`${HIDREAM_URL}/api/model/status`)
-    if (resp.ok) {
-      const data = await resp.json() as { loaded: boolean }
-      modelLoaded = data.loaded
-      console.log(`[model-tracker] Synced with Flask — model loaded: ${modelLoaded}`)
-    }
-  } catch {
-    console.log('[model-tracker] Could not reach Flask, assuming model not loaded')
-    modelLoaded = false
-  }
-}
-
-export async function startIdleCheck() {
-  // Sync actual model state from Flask before starting
-  await syncModelStatus()
-
-  // Check every 60 seconds
+export function startIdleCheck(): void {
   idleTimer = setInterval(() => {
-    const idleMs = Date.now() - lastActivity
-    if (idleMs >= IDLE_TIMEOUT_MS && modelLoaded) {
-      unloadModel()
+    const now = Date.now()
+    for (const [name, tracker] of trackers) {
+      if (tracker.loaded && now - tracker.lastActivity >= tracker.idleTimeoutMs) {
+        unloadServer(name)
+      }
     }
   }, 60_000)
-
-  // Initialize with current time
-  lastActivity = Date.now()
-  console.log('[model-tracker] Idle check started (10 min timeout)')
+  console.log('[model-tracker] Idle check started')
 }
 
-export function stopIdleCheck() {
+export function stopIdleCheck(): void {
   if (idleTimer) {
     clearInterval(idleTimer)
     idleTimer = null

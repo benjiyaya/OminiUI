@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express'
 import OpenAI from 'openai'
-import { imageTools } from './tools.js'
+import { mcpClient } from './mcp-client.js'
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -10,38 +10,60 @@ interface ChatMessage {
   name?: string
 }
 
-const SYSTEM_PROMPT = `You are OminiUI, an AI creative assistant powered by HiDream-O1-Image. You help users create and edit images through natural conversation.
+function getSystemPrompt(): string {
+  const tools = mcpClient.getAggregatedTools()
+  const statuses = mcpClient.getServerStatuses()
+  const connectedServers = statuses.filter((s) => s.status === 'connected')
 
-## Your capabilities
-- **create_image**: Generate new images from text descriptions (no images attached)
-- **edit_image**: Edit ONE image the user has attached — the user's attached image is used automatically
-- **subject_driven_image**: Generate images using 2-6 attached reference images for subject-driven personalization — the user's attached images are used automatically
+  if (tools.length === 0) {
+    return `You are OminiUI, an AI creative assistant. No image or video generation tools are currently connected. Politely let the user know and suggest they check the MCP server settings.`
+  }
 
-## Important: How images work
+  const toolList = tools
+    .map((t: any) => {
+      const fn = t.function
+      const params = fn.parameters?.properties
+        ? Object.keys(fn.parameters.properties).join(', ')
+        : 'none'
+      return `- ${fn.name}: ${fn.description}\n  Parameters: ${params}`
+    })
+    .join('\n\n')
+
+  const serverList = connectedServers.map((s) => `${s.displayName} (${s.toolCount} tools)`).join(', ')
+
+  return `You are OminiUI, an AI creative assistant. You help users create, edit, and generate images and videos through natural conversation.
+
+## Connected Engines
+${serverList}
+
+## Available Tools
+${toolList}
+
+## How images work
 - The user can attach up to 6 images. You do NOT need to pass image data in tool arguments — the system attaches them automatically.
-- If the user attached 1 image → use edit_image
-- If the user attached 2-6 images → use subject_driven_image
-- If no images attached → use create_image
+- If the user attached 1 image → use an edit tool
+- If the user attached 2-6 images → use a subject-driven/personalization tool
+- If no images attached → use a text-to-image tool
 - You should NOT ask the user to "pass" or "send" images. They are already attached.
 
 ## Guidelines
-- When the user asks to create, generate, or draw an image with no attachments, call create_image.
-- When the user has attached 1 image and asks to edit, modify, or transform it, call edit_image.
-- When the user has attached 2-6 images and wants to generate a new scene featuring those subjects, call subject_driven_image.
+- Choose the most appropriate tool based on the user's request and available engines.
+- When multiple engines support the same capability, pick the one best suited for the task.
 - Always write rich, detailed prompts in English following the SCALIST framework: Subject, Composition, Action, Location, Image style, Specs, Text rendering.
-- If the user writes in another language, still produce the image prompt in English.
+- If the user writes in another language, still produce the prompt in English.
 - Be conversational and helpful. Explain what you're about to create before calling a tool.
-- After an image is generated, describe what was created and offer to make adjustments.
+- After generation, describe what was created and offer to make adjustments.
 - For text rendering in images, put the exact text in quotes and specify font, color, size, and position.`
+}
 
 function getClient(): OpenAI {
-  const baseURL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1'
-  const apiKey = process.env.OLLAMA_API_KEY || 'ollama'
+  const baseURL = process.env.LLM_BASE_URL || process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1'
+  const apiKey = process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY || 'ollama'
   return new OpenAI({ baseURL, apiKey })
 }
 
 export function getModelName(): string {
-  return process.env.OLLAMA_MODEL || 'qwen3.6:27b-bf16'
+  return process.env.LLM_MODEL || process.env.OLLAMA_MODEL || ''
 }
 
 export async function chatHandler(req: Request, res: Response) {
@@ -53,10 +75,9 @@ export async function chatHandler(req: Request, res: Response) {
 
     const model = userModel || getModelName()
     const client = getClient()
+    const tools = mcpClient.getAggregatedTools()
 
     // Filter and sanitize messages for Ollama compatibility
-    // - Ollama requires non-null content on all messages
-    // - Ollama doesn't support 'tool' role, skip those
     const cleanMessages: ChatMessage[] = messages
       .filter((m) => m.role !== 'tool')
       .map((m) => ({
@@ -65,15 +86,15 @@ export async function chatHandler(req: Request, res: Response) {
       }))
 
     const fullMessages: ChatMessage[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: getSystemPrompt() },
       ...cleanMessages,
     ]
 
     const completion = await client.chat.completions.create({
       model,
       messages: fullMessages as any,
-      tools: imageTools as any,
-      tool_choice: 'auto',
+      tools: tools.length > 0 ? (tools as any) : undefined,
+      tool_choice: tools.length > 0 ? 'auto' : undefined,
       temperature: 0.7,
       max_tokens: 4096,
     })
@@ -92,7 +113,9 @@ export async function chatHandler(req: Request, res: Response) {
   }
 }
 
-// Endpoint to get the current model name
 export async function modelInfoHandler(_req: Request, res: Response) {
-  res.json({ model: getModelName() })
+  res.json({
+    model: getModelName(),
+    servers: mcpClient.getServerStatuses(),
+  })
 }
