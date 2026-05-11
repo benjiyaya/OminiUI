@@ -3,6 +3,8 @@
 This is an UI Wrapper for HiDream-O1-Image : https://github.com/HiDream-ai/HiDream-O1-Image
  Required to have the Official Github for pipeline and model weights in order to run this.
 
+More Ongoing update and other development, feel free to check out in Patreon: https://patreon.com/aifuturetech
+
 HiDream-O1-Image: https://github.com/HiDream-ai/HiDream-O1-Image
 
 HiDream-O1-Image Model: https://huggingface.co/HiDream-ai/HiDream-O1-Image
