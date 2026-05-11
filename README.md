@@ -1,45 +1,27 @@
 # HiDream-O1-Image-OminiUI
 
-This is an UI Wrapper for HiDream-O1-Image : https://github.com/HiDream-ai/HiDream-O1-Image
- Required to have the Official Github for pipeline and model weights in order to run this.
+A conversational AI interface for image generation and editing, powered by **MCP (Model Context Protocol)** servers and any **OpenAI-compatible LLM**.
+
+Describe what you want in natural language. The LLM reasons through your request, then calls the appropriate image/video tool automatically via MCP servers.
 
 More Ongoing update and other development, feel free to check out in Patreon: https://patreon.com/aifuturetech
 
-HiDream-O1-Image: https://github.com/HiDream-ai/HiDream-O1-Image
-
-HiDream-O1-Image Model: https://huggingface.co/HiDream-ai/HiDream-O1-Image
- 
- Or
- 
-HiDream-O1-Image-Dev Model: https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev
-
-A conversational AI interface for image generation and editing, powered by **HiDream-O1-Image** and **Ollama** tool calling.
-
-Describe what you want in natural language. The LLM reasons through your request, then calls the appropriate image tool automatically.
-
-<img width="1852" height="1046" alt="Screenshot 2026-05-11 045526" src="https://github.com/user-attachments/assets/92c4a84f-7bb7-4ffc-a3e4-3cf361fe7323" />
-
-<img width="1863" height="1048" alt="Screenshot 2026-05-11 045635" src="https://github.com/user-attachments/assets/36c964bb-6d39-4411-b534-823d3018828b" />
-
-<img width="1861" height="1050" alt="Screenshot 2026-05-11 045609" src="https://github.com/user-attachments/assets/bca70941-d655-48df-9432-dec776afec96" />
-
-<img width="1871" height="1046" alt="Screenshot 2026-05-11 045426" src="https://github.com/user-attachments/assets/27e20e57-5ea3-4af7-80e1-519c3785b04f" />
-
-<img width="1871" height="1055" alt="Screenshot 2026-05-11 045502" src="https://github.com/user-attachments/assets/fa22c97a-03d1-4230-8781-e915ba57f178" />
-
-
 ## Features
 
+- **Multi-Engine Support** — Connect multiple MCP servers (HiDream, Flux, Kling, etc.) for different generation tasks
 - **Text-to-Image** — Generate images from detailed text prompts
 - **Image Editing** — Upload a photo and describe modifications
-- **Tool Calling** — Ollama decides when to invoke image tools based on conversation context
-- **Enhance Prompt** — Toggle button to optionally refine prompts via OpenAI-compatible API before sending
+- **Tool Calling** — LLM decides when to invoke tools based on conversation context
+- **Agent Workflow** — Multi-step creative tasks with planning and execution (stories, character references, scene composition)
+- **Enhance Prompt** — Toggle to refine prompts via OpenAI-compatible API before sending
+- **File Attachments** — Attach images, audio, and video files to your messages
+- **Add to Attachment** — Attach generated outputs back to composer for iterative editing
 - **Real-time Progress** — SSE streaming shows generation steps and preview thumbnails
 - **Auto-save** — Generated images are saved with timestamped filenames
 - **Chat History** — SQLite database persists all sessions, messages, and image references
-- **Model Auto-unload** — HiDream model is released from GPU memory after 10 minutes of inactivity, and reloaded on demand
+- **Model Auto-unload** — MCP server models are released from GPU after idle timeout, reloaded on demand
+- **MCP Settings Page** — Dedicated settings page with expandable server panels showing tool details
 - **Multi-session** — Sidebar manages multiple independent conversations
-- **Model Display** — Sidebar footer shows current Ollama model name
 - **Lightbox** — Click any generated image for full-size viewing and download
 
 ## Architecture
@@ -47,26 +29,30 @@ Describe what you want in natural language. The LLM reasons through your request
 ```
 Browser (React + TypeScript)
    │
-   ├── /api/chat       →  Express server  →  Ollama (OpenAI-compatible)
-   │                                        ↕ tool definitions
-   ├── /api/generate    →  Express server  →  HiDream Flask API (port 7860)
-   │                                        →  Python inference pipeline (CUDA)
+   ├── /api/chat        →  Express server  →  OpenAI-compatible LLM (tool calling)
+   │
+   ├── /api/workflow    →  Express server  →  DeepAgent (multi-step creative tasks)
+   │
+   ├── /api/tools/execute → Express server →  MCP Client  →  MCP Servers (HiDream, Flux, etc.)
+   │                                             ↕
+   │                                         Tool Registry
+   │
+   ├── /api/mcp-servers →  Express server  →  MCP Client Manager (connect/reconnect/status)
+   │
    ├── /api/refine      →  Express server  →  OpenAI-compatible API (prompt enhancement)
-   ├── /api/sessions    →  Express server  →  SQLite (chat history)
-   └── /api/model/*     →  Express server  →  HiDream Flask API (unload/reload)
+   └── /api/sessions    →  Express server  →  SQLite (chat history)
 ```
 
-The Express backend acts as an orchestrator: it sends user messages plus tool schemas to Ollama, then executes any tool calls against the HiDream image API.
+The Express backend orchestrates between the LLM and MCP servers. It sends user messages to the LLM with tool schemas, then routes any tool calls to the appropriate MCP server. Multiple MCP servers can be connected simultaneously.
 
 ## Prerequisites
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
 | Node.js     | 18+     | For the OminiUI server and frontend |
-| Python      | 3.9+    | For HiDream-O1-Image inference |
-| CUDA        | 12.x    | GPU inference requires NVIDIA CUDA |
-| Ollama      | latest  | Local LLM server with OpenAI-compatible API |
-| VRAM        | 24 GB+  | HiDream-O1-Image-Dev model |
+| VRAM        | varies  | Depends on which MCP server models you run |
+
+> **Note:** You no longer need Python or CUDA locally. Image/video generation runs on separate MCP servers that can be on the same machine or remote.
 
 ## Setup
 
@@ -77,48 +63,7 @@ cd OminiUi
 npm install
 ```
 
-### 2. Pull an Ollama model with tool calling support
-
-```bash
-ollama pull <your-model>
-```
-
-Any model that supports function calling works (e.g., `qwen3:8b`, `llama3.1`, `mistral-nemo`). Set the model name in `.env` under `OLLAMA_MODEL`.
-
-### 3. Start Ollama
-
-```bash
-ollama serve
-```
-
-Ollama listens on `http://localhost:11434` by default.
-
-### 4. Patch HiDream-O1-Image and start the Flask API
-
-Clone and set up [HiDream-O1-Image](https://github.com/HiDream-ai/HiDream-O1-Image), then **replace `app.py`** with the patched version from this repo:
-
-```bash
-cd HiDream-O1-Image
-# Back up original
-mv app.py app.py.original
-# Copy patched version from this repo
-cp ../OminiUi/app.py ./app.py
-```
-
-The patched `app.py` adds model reload support — OminiUI needs this to reload the model after auto-unload. Without it, model reload returns a 400 error.
-
-Then start the Flask API:
-
-```bash
-venv\Scripts\activate
-python app.py --model_path /path/to/model-HiDream-O1-Image-Dev --model_type dev --host 127.0.0.1 --port 7860
-```
-
-This loads the model onto GPU and exposes the image generation API on port 7860. Wait until you see `[app] Serving on http://127.0.0.1:7860` before proceeding.
-
-> **First run** downloads model weights if not cached locally. This may take several minutes.
-
-### 5. Configure environment
+### 2. Configure environment
 
 Copy the example and edit `.env`:
 
@@ -126,9 +71,34 @@ Copy the example and edit `.env`:
 cp .env.example .env
 ```
 
+Set your LLM endpoint (any OpenAI-compatible API):
+
+```env
+# Examples:
+# OpenAI
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-...
+LLM_MODEL=gpt-4o
+
+# Ollama (local)
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_API_KEY=ollama
+LLM_MODEL=qwen3:8b
+
+# Groq
+LLM_BASE_URL=https://api.groq.com/openai/v1
+LLM_API_KEY=gsk_...
+LLM_MODEL=llama-3.3-70b-versatile
+
+# Together
+LLM_BASE_URL=https://api.together.xyz/v1
+LLM_API_KEY=...
+LLM_MODEL=meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo
+```
+
 See [Configuration](#configuration) below for all options.
 
-### 6. Start OminiUI
+### 3. Start OminiUI
 
 ```bash
 cd OminiUi
@@ -141,45 +111,67 @@ This starts both:
 
 Open `http://localhost:5173` in your browser.
 
+### 4. Connect MCP Servers
+
+1. Click **Settings** in the sidebar
+2. Click **+ Add MCP Server**
+3. Enter the server details:
+   - **Name**: unique identifier (e.g., `hidream`, `flux`, `kling`)
+   - **Display Name**: human-readable name (e.g., `HiDream-O1-Image`)
+   - **MCP URL**: the server's MCP endpoint (e.g., `http://localhost:8085/mcp`)
+4. Click **Connect**
+
+The server will connect and list its available tools. You can expand the server panel to see all tools with their parameters.
+
+### MCP Server Examples
+
+Any MCP-compatible image/video generation server works. Common options:
+
+| Server | Description | Default Port |
+|--------|-------------|--------------|
+| HiDream-O1-Image | Text-to-image, image editing | 8085 |
+| Flux | Fast image generation | 8085 |
+| Kling | Video generation | 8085 |
+
+> **Note:** Each MCP server runs its own model. Make sure you have enough VRAM for the models you connect.
+
 ## Configuration
 
 All settings are in `.env` at the project root.
 
-### Ollama Settings
+### LLM Settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `OLLAMA_BASE_URL` | OpenAI-compatible endpoint for Ollama | `http://localhost:11434/v1` |
-| `OLLAMA_API_KEY` | API key (Ollama doesn't validate this) | `ollama` |
-| `OLLAMA_MODEL` | Model to use for chat and tool calling | — |
+| `LLM_BASE_URL` | OpenAI-compatible endpoint | `http://localhost:11434/v1` |
+| `LLM_API_KEY` | API key | `ollama` |
+| `LLM_MODEL` | Model for chat and tool calling | `qwen3:8b` |
 
-### OpenAI API Settings (Prompt Enhancement)
+### Prompt Enhancement (Optional)
 
-Optional. Used when the **Enhance Prompt** toggle is ON. The prompt is rewritten into a detailed image generation prompt before being sent to the LLM.
+Used when the **Enhance Prompt** toggle is ON. Rewrites prompts into detailed image generation prompts.
 
 | Variable | Description |
 |----------|-------------|
 | `OPENAI_BASE_URL` | Any OpenAI-compatible API endpoint |
-| `OPENAI_API_KEY` | Your API key (required for prompt enhancement) |
+| `OPENAI_API_KEY` | Your API key |
 | `OPENAI_MODEL` | Model name on the endpoint |
 
-Leave these empty to disable prompt enhancement.
+Leave empty to disable prompt enhancement.
 
-### HiDream Settings
+### MCP Server Settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `HIDREAM_API_URL` | URL of the running HiDream Flask API | `http://localhost:7860` |
-| `HIDREAM_MODEL_PATH` | Path to model checkpoint directory (used by Flask) | — |
-| `HIDREAM_MODEL_TYPE` | `dev` (28 steps, faster) or `full` (50 steps, higher quality) | `dev` |
-| `HIDREAM_RESULTS_DIR` | Directory to auto-save generated images | `../HiDream-O1-Image/results` |
-| `MODEL_IDLE_TIMEOUT_MS` | Unload HiDream model after this many ms of inactivity | `600000` (10 min) |
+| `MCP_CONFIG_PATH` | Path to MCP servers config file | `./mcp-servers.json` |
+| `MODEL_IDLE_TIMEOUT_MS` | Unload model after ms of inactivity | `600000` (10 min) |
 
 ### Server Settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | Express backend port | `3001` |
+| `RESULTS_DIR` | Directory to save generated images | `results` |
 
 ## Usage
 
@@ -192,61 +184,86 @@ A photorealistic cat wearing an astronaut helmet, floating in deep space
 with Earth visible in the background. Cinematic lighting, 50mm lens.
 ```
 
-The LLM will call the `create_image` tool automatically.
+The LLM will call the appropriate image generation tool automatically.
 
 ### Edit an image
 
-1. Click **Attach image** and upload a source photo
+1. Click **Attach files** and upload a source photo
 2. Describe the edits you want:
 
 ```
 Make this photo look like an oil painting in the style of Van Gogh
 ```
 
-The LLM will call the `edit_image` tool with the attached image.
+The LLM will call the edit tool with the attached image.
+
+### Agent Workflow
+
+Click **Workflow** in the input toolbar to enable agent mode. This is for complex, multi-step creative tasks:
+
+```
+Create a story with 3 scenes: a knight in a forest, then fighting a dragon,
+then celebrating in a castle. Generate reference images for each scene.
+```
+
+The agent will plan the workflow, generate character references, and compose each scene step by step.
 
 ### Enhance Prompt
 
-Click the **Enhance Prompt** toggle in the input toolbar before sending. When enabled, your prompt is sent to an OpenAI-compatible API which rewrites it into a detailed image generation prompt following the SCALIST framework (Subject, Composition, Action, Location, Image style, Specs, Text rendering).
+Click **Enhance Prompt** in the input toolbar. Your prompt is rewritten into a detailed image generation prompt following the SCALIST framework (Subject, Composition, Action, Location, Image style, Specs, Text rendering).
 
-This is optional — the LLM can also refine prompts on its own, but this gives you explicit control. Requires `OPENAI_API_KEY` to be set.
+Requires `OPENAI_API_KEY` to be set.
 
-### Model Auto-unload
+### Attach Files
 
-The HiDream model uses significant GPU memory. When no images are generated for 10 minutes, OminiUI automatically tells the Flask API to unload the model and release GPU memory. The next image generation request will reload the model automatically.
+Click **Attach files** to upload images, audio, or video. You can attach up to 6 files. These are sent along with your message to the LLM for context.
 
-You can adjust the timeout with `MODEL_IDLE_TIMEOUT_MS` in `.env`.
+### Add Generated Output to Attachment
+
+When an image is generated, click **Add to attachment** to attach it to the composer for iterative editing.
+
+## MCP Settings Page
+
+Click **Settings** in the sidebar to open the MCP Settings page. Here you can:
+
+- **View all connected servers** with their status (connected/connecting/error/disconnected)
+- **Expand server panels** to see individual tools, descriptions, and input parameters
+- **Add/remove servers** dynamically
+- **Toggle servers** on/off without removing them
+- **Reconnect** failed servers
 
 ## Project Structure
 
 ```
 OminiUi/
 ├── .env.example                # Environment configuration template
-├── app.py                      # Patched HiDream Flask API (replace in HiDream-O1-Image/)
-├── index.html                  # Vite entry HTML
+├── .gitignore                  # Git ignore rules
+├── mcp-servers.json            # MCP server configurations
 ├── package.json                # Dependencies and scripts
+├── index.html                  # Vite entry HTML
+├── vite.config.ts              # Vite config with API proxy
 ├── tsconfig.json               # TypeScript config (frontend)
 ├── tsconfig.node.json          # TypeScript config (server)
-├── vite.config.ts              # Vite config with API proxy
-├── data/
-│   └── ominiui.db              # SQLite database (auto-created)
 ├── server/
-│   ├── index.ts                # Express server entry point with all routes
-│   ├── chat.ts                 # Chat endpoint — forwards to Ollama with tools
-│   ├── tools.ts                # Tool definitions (create_image, edit_image)
-│   ├── generate.ts             # Generation endpoint — proxies to HiDream API + auto-save
+│   ├── index.ts                # Express server with all routes
+│   ├── chat.ts                 # Chat endpoint — forwards to LLM with tools
+│   ├── generate.ts             # Tool execution — routes to MCP servers
+│   ├── agent.ts                # DeepAgent workflow (multi-step creative tasks)
+│   ├── mcp-client.ts           # MCP client manager (connections, tool registry)
+│   ├── mcp-config.ts           # MCP server config persistence
+│   ├── model-tracker.ts        # Model idle tracking and auto-unload
 │   ├── db.ts                   # SQLite database layer
-│   ├── model-tracker.ts        # HiDream model idle tracking and auto-unload
-│   └── prompt-refine.ts        # Prompt enhancement via OpenAI-compatible API
+│   └── prompt-refine.ts        # Prompt enhancement via OpenAI API
 └── src/
     ├── main.tsx                # React entry point
-    ├── App.tsx                 # Root component — session management + DB sync
-    ├── index.css               # Global styles (dark Omni theme)
-    ├── vite-env.d.ts           # Vite type declarations
+    ├── App.tsx                 # Root component — view routing + session management
+    ├── index.css               # Global styles (dark theme)
     └── components/
-        ├── Chat.tsx            # Main chat interface + refine toggle + tool orchestration
+        ├── Chat.tsx            # Main chat interface + tool orchestration
         ├── MessageBubble.tsx   # Renders text, tool calls, images
-        └── Sidebar.tsx         # Conversation list + model name display
+        ├── Sidebar.tsx         # Conversation list + engine status
+        ├── McpSettings.tsx     # MCP Settings page with expandable panels
+        └── Settings.tsx        # Legacy settings dialog (deprecated)
 ```
 
 ## API Endpoints
@@ -255,10 +272,21 @@ OminiUi/
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/chat` | Send messages to Ollama with tool definitions |
-| `POST` | `/api/generate` | Direct image generation (internal) |
-| `GET` | `/api/generate/stream/:jobId` | SSE progress stream |
-| `POST` | `/api/refine` | Enhance a prompt via OpenAI-compatible API |
+| `POST` | `/api/chat` | Send messages to LLM with tool definitions |
+| `POST` | `/api/workflow` | Execute multi-step agent workflow |
+| `POST` | `/api/tools/execute` | Execute a tool call via MCP server |
+| `POST` | `/api/refine` | Enhance a prompt via OpenAI API |
+
+### MCP Servers
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/mcp-servers` | List all servers and their statuses |
+| `POST` | `/api/mcp-servers` | Add a new MCP server |
+| `PUT` | `/api/mcp-servers/:name` | Update server config (enable/disable, URL) |
+| `DELETE` | `/api/mcp-servers/:name` | Remove a server |
+| `POST` | `/api/mcp-servers/:name/reconnect` | Force reconnect a server |
+| `GET` | `/api/mcp-servers/:name/tools` | Get tools for a specific server |
 
 ### Sessions
 
@@ -267,29 +295,22 @@ OminiUi/
 | `GET` | `/api/sessions` | List all sessions |
 | `POST` | `/api/sessions` | Create a session |
 | `PUT` | `/api/sessions/:id` | Rename a session |
-| `DELETE` | `/api/sessions/:id` | Delete a session and its messages |
+| `DELETE` | `/api/sessions/:id` | Delete a session |
 | `GET` | `/api/sessions/:id/messages` | Get messages for a session |
 | `POST` | `/api/sessions/:id/messages` | Save a message |
-
-### Model
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/model` | Get current Ollama model name |
-| `GET` | `/api/model/status` | Get HiDream model load status and idle time |
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| `CUDA is required` | Ensure NVIDIA drivers and CUDA 12.x are installed |
-| HiDream API not reachable | Verify the Flask server is running on port 7860 |
-| Ollama connection refused | Run `ollama serve` and check port 11434 |
-| Model not found | Run `ollama pull <your-model>` and set `OLLAMA_MODEL` in `.env` |
-| Out of VRAM | The model auto-unloads after 10 min idle; or use `--model_type dev` |
-| Generation hangs | Check HiDream Flask terminal for GPU errors |
+| MCP server won't connect | Check the MCP URL and ensure the server is running |
+| `MCP error -32001: Request timed out` | Tool call exceeded 10min timeout — check MCP server logs |
+| Tool not found | Ensure the MCP server exposes the tool — check Settings page |
+| No tools available | Connect at least one MCP server in Settings |
+| Generation hangs | Check MCP server terminal for GPU errors |
+| Model stays in VRAM | Agent workflow auto-unloads; MCP servers unload after idle timeout |
 | Prompt enhancement fails | Check `OPENAI_API_KEY` is set in `.env` |
-| Images not saved | Check `HIDREAM_RESULTS_DIR` path exists |
+| SSE reconnection spam | Already fixed — SSE retries disabled in transport config |
 
 ## Scripts
 
